@@ -168,6 +168,7 @@ def bootstrap_confidence_intervals(
 def walk_forward_evaluate(
     df: pd.DataFrame,
     feature_cols: List[str],
+    *,
     target_col: str = "return_t+1",
     algo: str = "logistic",
     n_splits: int = 5,
@@ -175,11 +176,12 @@ def walk_forward_evaluate(
     optimize_thresholds: bool = True,  # Whether to optimize probability thresholds
     cost_lookup: Optional[Dict[str, float]] = None,  # Transaction costs by ticker
     spread_lookup: Optional[Dict[str, float]] = None,  # Spreads by ticker
-    n_bootstrap: int = 1000  # Number of bootstrap samples for confidence intervals
-) -> pd.DataFrame:
+    n_bootstrap: int = 1000,  # Number of bootstrap samples for confidence intervals
+    collect_oos: bool = False  # Whether to collect out-of-sample predictions
+) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
     """
     Perform an expanding-window walk-forward evaluation with transaction costs.
-    Returns a DataFrame of fold-level metrics.
+    Returns a DataFrame of fold-level metrics and optionally OOS predictions.
     
     Note: Features at time t predict returns at t+1, so we need to align:
     - X[t] -> y[t+1] for training
@@ -195,6 +197,7 @@ def walk_forward_evaluate(
 
     tscv = TimeSeriesSplit(n_splits=n_splits)
     fold_results = []
+    oos_records = [] if collect_oos else None
 
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
         # Skip initial days in train set to account for rolling windows
@@ -209,8 +212,6 @@ def walk_forward_evaluate(
         date_train, date_test = dates[train_idx], dates[test_idx]
         
         # Get the actual returns for strategy performance
-        # Note: test_idx gives us the indices for features at time t
-        # We need the returns at t+1 for these predictions
         strategy_returns_idx = test_idx + 1  # Shift forward by 1 to get t+1 returns
         strategy_returns_idx = strategy_returns_idx[strategy_returns_idx < len(returns)]  # Handle last day
         
@@ -232,7 +233,6 @@ def walk_forward_evaluate(
 
         # 5) optimize threshold on TRAIN only
         if optimize_thresholds:
-            # Align returns_train with next-day returns
             returns_train_idx = train_idx + 1
             returns_train_idx = returns_train_idx[returns_train_idx < len(returns)]
             returns_train = returns[returns_train_idx]
@@ -311,7 +311,16 @@ def walk_forward_evaluate(
             "threshold": threshold
         })
 
-    return pd.DataFrame(fold_results)
+        # ----  optionally store out-of-sample predictions  ----
+        if collect_oos:
+            oos_records.append(pd.DataFrame({
+                "date": date_test,
+                "prob": prob_test,
+                "threshold": threshold,   # could be handy later
+            }))
+
+    oos_df = pd.concat(oos_records, ignore_index=True) if collect_oos else None
+    return pd.DataFrame(fold_results), oos_df
 
 def evaluate_model(model, X_train: np.ndarray, X_test: np.ndarray, 
                   y_train: np.ndarray, y_test: np.ndarray) -> None:
@@ -397,6 +406,8 @@ def main():
                       help="Typical spread for futures (optional)")
     parser.add_argument("--n-bootstrap", type=int, default=1000,
                       help="Number of bootstrap samples for confidence intervals")
+    parser.add_argument("--asset", type=str, required=True,
+                      help="Asset identifier (e.g., eurusd, usdjpy, zn). Used to name OOS prediction file.")
     args = parser.parse_args()
     
     try:
@@ -424,7 +435,7 @@ def main():
         
         # Run walk-forward evaluation
         logger.info("Running walk-forward evaluation...")
-        results = walk_forward_evaluate(
+        results, oos_df = walk_forward_evaluate(
             df, 
             feature_cols, 
             algo=args.algo, 
@@ -433,7 +444,8 @@ def main():
             optimize_thresholds=not args.no_threshold_opt,
             cost_lookup=cost_lookup,
             spread_lookup=spread_lookup,
-            n_bootstrap=args.n_bootstrap
+            n_bootstrap=args.n_bootstrap,
+            collect_oos=True
         )
         
         # Print detailed fold-level results
@@ -456,6 +468,15 @@ def main():
         logger.info(f"Mean CAGR: {results.cagr.mean():.3f} ± {results.cagr.std():.3f}")
         logger.info(f"Mean Threshold: {results.threshold.mean():.3f} ± {results.threshold.std():.3f}")
         logger.info(f"Total Cost: {results.total_cost.sum():.4f}")
+        
+        # -----------------------------------------------------------
+        #  SAVE OUT-OF-SAMPLE PROBABILITIES  (for run_backtest.py)
+        # -----------------------------------------------------------
+        pred_dir = Path("predictions")
+        pred_dir.mkdir(exist_ok=True)             # ensure folder exists
+        oos_path = pred_dir / f"oos_prob_{args.asset.lower()}.csv"
+        oos_df.to_csv(oos_path, index=False)
+        logger.info(f"OOS probability file written to {oos_path}")
         
         # Prepare data for final model
         X_train, X_test, y_train, y_test, feature_names, scaler = prepare_data(df)

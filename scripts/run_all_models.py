@@ -57,14 +57,14 @@ def train_and_backtest(asset, model_type, cfg):
         f"--cost-fx {cfg.cost_fx} --cost-fut {cfg.cost_fut} "
         f"{'--spread-fx '+str(cfg.spread_fx) if cfg.spread_fx is not None else ''} "
         f"{'--spread-fut '+str(cfg.spread_fut) if cfg.spread_fut is not None else ''} "
-        f"--n-bootstrap {cfg.n_bootstrap}"
+        f"--n-bootstrap {cfg.n_bootstrap} "
+        f"--asset {asset}"
     )
     run_command(train_cmd)
 
     # backtest
     backtest_cmd = (
         f"python -m scripts.run_backtest "
-        f"--model {model_pkl} "
         f"--features {feats_csv} "
         f"--asset {asset} "
         f"--returns-out {returns_csv} "
@@ -73,7 +73,8 @@ def train_and_backtest(asset, model_type, cfg):
         f"--threshold {cfg.threshold} "
         f"--cost-fx {cfg.cost_fx} --cost-fut {cfg.cost_fut} "
         f"{'--spread-fx '+str(cfg.spread_fx) if cfg.spread_fx is not None else ''} "
-        f"{'--spread-fut '+str(cfg.spread_fut) if cfg.spread_fut is not None else ''}"
+        f"{'--spread-fut '+str(cfg.spread_fut) if cfg.spread_fut is not None else ''} "
+        f"{'--use-threshold-col' if cfg.use_threshold_col else ''}"
     )
     run_command(backtest_cmd)
 
@@ -93,10 +94,12 @@ def main():
     p.add_argument("--spread-fut",   type=float,  default=None)
     # final backtest threshold
     p.add_argument("--threshold",    type=float,  default=0.5)
+    p.add_argument("--use-threshold-col", action="store_true", 
+                  help="Use per-fold thresholds from CSV instead of global threshold")
     args = p.parse_args()
 
     # ensure dirs
-    for d in ("models","plots","backtest","visuals"):
+    for d in ("models", "plots", "backtest", "visuals", "predictions"):
         Path(d).mkdir(exist_ok=True)
 
     for asset in args.assets:

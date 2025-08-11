@@ -60,34 +60,39 @@ def load_features(path: Path) -> pd.DataFrame:
     return df
 
 def simulate_backtest(
-    pipeline: Pipeline,
-    feature_names: list,
     df: pd.DataFrame,
     cost_lookup: Dict[str, float],
     threshold: float = 0.5,
-    spread_lookup: Optional[Dict[str, float]] = None
+    spread_lookup: Optional[Dict[str, float]] = None,
+    use_threshold_col: bool = False
 ) -> pd.DataFrame:
     """
     Simulate backtest with vectorized transaction costs and optional slippage.
     
     Args:
-        pipeline: Trained model pipeline (scaler + model)
-        feature_names: List of feature names
         df: DataFrame with features and dates
         cost_lookup: Dictionary mapping tickers to round-trip costs
-        threshold: Probability threshold for long/short decisions
+        threshold: Probability threshold for long/short decisions (used if use_threshold_col is False)
         spread_lookup: Optional dictionary mapping tickers to typical spreads
+        use_threshold_col: Whether to use per-fold thresholds from the CSV
     """
-    # Prepare features and get predictions
-    X = df[feature_names].values
-    prob = pipeline.predict_proba(X)[:, 1]
-    positions = np.where(prob > threshold, 1, -1)
+    # Ensure chronological order and remove rows with missing next-day returns
+    df = df.sort_values("date")
+    valid_mask = df["return_t+1"].notna()
+    df = df.loc[valid_mask].copy()
     
-    # Get returns
-    y_ret = df["return_t+1"].values
+    # Handle duplicate dates (keep last prediction if any)
+    df = df.drop_duplicates('date', keep='last')
     
-    # Strategy P&L = position * market return
-    strat_ret = positions * y_ret
+    # Get positions using either per-fold thresholds or global threshold
+    if use_threshold_col and 'threshold' in df.columns:
+        thr_vec = df['threshold'].to_numpy()
+        positions = np.where(df['prob'].values > thr_vec, 1, -1)
+    else:
+        positions = np.where(df['prob'].values > threshold, 1, -1)
+    
+    # Strategy P&L = position * next-day return
+    strategy_ret = positions * df["return_t+1"].to_numpy()
     
     # ------------------- TRANSACTION COSTS -------------------
     # Build cost array (requires `df['ticker']`)
@@ -124,17 +129,18 @@ def simulate_backtest(
     # ----------------------------------------------------------
     
     # Subtract costs from returns
-    strat_ret = strat_ret - costs
+    strategy_ret = strategy_ret - costs
     
     # Create backtest DataFrame
     backtest_df = pd.DataFrame({
         "date": df["date"],
-        "market_ret": y_ret,
+        "market_ret": df["return_t+1"].values,
         "position": positions,
-        "strategy_ret": strat_ret,
+        "strategy_ret": strategy_ret,
         "cost": costs,  # Track costs separately
         "trades": trades,  # Track trade days
-        "prob": prob  # Track probabilities
+        "prob": df["prob"].values,  # Track probabilities
+        "threshold": df["threshold"].values if use_threshold_col and 'threshold' in df.columns else threshold  # Track thresholds
     }).set_index("date")
     
     return backtest_df
@@ -220,7 +226,6 @@ def save_outputs(backtest_df: pd.DataFrame, metrics: dict,
 
 def main():
     parser = argparse.ArgumentParser(description="Run backtest simulation")
-    parser.add_argument("--model", type=str, required=True, help="Path to trained model")
     parser.add_argument("--features", type=str, required=True, help="Path to feature CSV file")
     parser.add_argument("--asset", type=str, required=True, help="Asset name (e.g. eurusd, usdjpy, zn)")
     parser.add_argument("--returns-out", type=str, required=True, help="Path to save daily returns")
@@ -229,16 +234,22 @@ def main():
     parser.add_argument("--cost-fx", type=float, default=0.0002, help="Round-trip cost for FX pairs (default: 0.0002)")
     parser.add_argument("--cost-fut", type=float, default=0.0005, help="Round-trip cost for futures (default: 0.0005)")
     parser.add_argument("--threshold", type=float, default=0.5, help="Probability threshold for long/short decisions (default: 0.5)")
+    parser.add_argument("--use-threshold-col", action="store_true", help="Use per-fold thresholds from CSV instead of global threshold")
     parser.add_argument("--spread-fx", type=float, default=None, help="Typical spread for FX pairs (optional)")
     parser.add_argument("--spread-fut", type=float, default=None, help="Typical spread for futures (optional)")
     args = parser.parse_args()
 
     try:
-        # Load model and features
-        model_path = Path(args.model)
-        pipeline, feature_names = load_model(model_path)
+        # Load features
         features_path = Path(args.features)
         df = load_features(features_path)
+
+        # Load pre-computed OOS probabilities
+        pred_path = Path(f"predictions/oos_prob_{args.asset.lower()}.csv")
+        prob_df = pd.read_csv(pred_path, parse_dates=["date"])
+        
+        # Merge probabilities with features
+        df = df.merge(prob_df[["date", "prob", "threshold"]], on="date", how="inner")
 
         # inject a ticker column if missing
         if "ticker" not in df.columns:
@@ -250,7 +261,7 @@ def main():
             "usdjpy": args.cost_fx,
             "zn": args.cost_fut
         }
-
+        
         # Define spread lookup if provided
         spread_lookup = None
         if args.spread_fx is not None or args.spread_fut is not None:
@@ -262,28 +273,27 @@ def main():
 
         # Run backtest
         logger.info("Running backtest simulation...")
-        bt = simulate_backtest(
-            pipeline,
-            feature_names,
-            df,
-            cost_lookup,
+        backtest_df = simulate_backtest(
+            df=df,
+            cost_lookup=cost_lookup,
             threshold=args.threshold,
-            spread_lookup=spread_lookup
+            spread_lookup=spread_lookup,
+            use_threshold_col=args.use_threshold_col
         )
 
         # Compute metrics
-        metrics = compute_metrics(bt)
+        metrics = compute_metrics(backtest_df)
         logger.info("\nPerformance Metrics:")
         for metric, value in metrics.items():
             logger.info(f"{metric}: {value:.4f}")
 
         # Save outputs
         save_outputs(
-            bt,
-            metrics,
-            Path(args.returns_out),
-            Path(args.equity_plot),
-            Path(args.metrics_out)
+            backtest_df=backtest_df,
+            metrics=metrics,
+            returns_out=Path(args.returns_out),
+            equity_plot=Path(args.equity_plot),
+            metrics_out=Path(args.metrics_out)
         )
 
         logger.info("Backtest complete!")
