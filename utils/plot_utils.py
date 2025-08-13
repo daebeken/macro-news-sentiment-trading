@@ -18,7 +18,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Set style
-plt.style.use('seaborn')
+try:
+    plt.style.use('seaborn')
+except OSError:
+    plt.style.use('default')  # Fallback to default style
 sns.set_palette("husl")
 
 def plot_equity_curve(returns: pd.Series,

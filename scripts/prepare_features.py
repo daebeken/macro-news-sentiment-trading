@@ -29,7 +29,12 @@ def load_sentiment(path: Path) -> pd.DataFrame:
 def load_market(path: Path, asset: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["date"])
     df = df[df["asset"] == asset][["date","close"]].sort_values("date")
+    
+    # Ensure market dates are UTC naive to match sentiment trading day alignment
+    df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(None)
+    
     logger.info(f"Loaded {len(df)} rows for {asset}")
+    logger.info(f"Date range: {df['date'].min()} to {df['date'].max()}")
     return df
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -61,9 +66,10 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f"sentiment_std_{w}d"] = df["sentiment_mean"].rolling(w).std()
         df[f"sentiment_vol_{w}d"] = df["sentiment_diff"].rolling(w).std()
     
-    # Next-day return and market vol
-    df["return_t+1"] = df["close"].pct_change().shift(-1)
-    df["volatility_20d"] = df["return_t+1"].rolling(20).std()
+    # Next-day return and market vol (avoid future information leakage)
+    ret_t = df["close"].pct_change()  # Known past returns (t-1→t)
+    df["return_t+1"] = ret_t.shift(-1)  # Prediction target unchanged
+    df["volatility_20d"] = ret_t.rolling(20, min_periods=10).std()  # Use past returns to estimate volatility
     
     # Interaction features
     df["sentiment_vol_interaction"] = df["sentiment_std_5d"] * df["volatility_20d"]
@@ -90,12 +96,22 @@ def main():
     sent = load_sentiment(sentiment_path)
     mkt  = pd.read_csv(market_path, parse_dates=["date"])
 
+    # Ensure market dates are UTC naive to match sentiment trading day alignment
+    mkt["date"] = pd.to_datetime(mkt["date"], utc=True).dt.tz_convert(None)
+    
+    logger.info(f"Sentiment data: {len(sent)} rows, date range: {sent['date'].min()} to {sent['date'].max()}")
+    logger.info(f"Market data: {len(mkt)} rows, assets: {mkt['asset'].unique().tolist()}")
+
     # Loop each asset
     for asset in mkt["asset"].unique():
         logger.info(f"Preparing features for {asset}")
         df_asset = mkt[mkt["asset"] == asset][["date", "close"]].sort_values("date")
+        
+        # Merge on trading day aligned dates
         merged = pd.merge(sent, df_asset, on="date", how="inner")
-        feats  = engineer_features(merged)
+        logger.info(f"Merged {len(merged)} rows for {asset}")
+        
+        feats = engineer_features(merged)
         save_features(feats, asset, out_dir)
 
 if __name__ == "__main__":

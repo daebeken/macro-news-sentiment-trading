@@ -35,11 +35,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Fetch market data')
     parser.add_argument('--start-date', 
                        type=str,
-                       default='2015-01-01',
+                       default='2015-02-18',
                        help='Start date in YYYY-MM-DD format')
     parser.add_argument('--end-date',
                        type=str,
-                       default='2025-04-30',
+                       default='2025-07-31',
                        help='End date in YYYY-MM-DD format')
     return parser.parse_args()
 
