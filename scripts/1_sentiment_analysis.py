@@ -1,3 +1,5 @@
+# IMPORTANT SCRIPT
+# python scripts/sentiment_analysis.py
 """
 Script for performing sentiment analysis on GDELT data.
 """
